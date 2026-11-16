@@ -1,7 +1,27 @@
 {
   "name": "git-pull-guard",
-  "version": "0.1.0",
-  "description": "Holt beim Sessionstart neue Commits, wenn es gefahrlos geht, und warnt sonst, erst zu pullen",
+  "version": "0.2.0",
+  "description": "Holt beim Sessionstart neue Commits, wenn es gefahrlos geht, warnt sonst, erst zu pullen, und hält Pushes auf einen veralteten Branch an",
   "license": "MIT",
-  "types": "./types/index.d.ts"
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "autoPull": {
+      "type": "boolean",
+      "title": "Automatisch pullen",
+      "description": "Holt neue Commits selbst, wenn der Branch sauber ist und keine eigenen Commits hat (sonst nur Warnung)",
+      "default": true
+    },
+    "recheckMinutes": {
+      "type": "number",
+      "title": "Erneut prüfen nach (Minuten)",
+      "description": "Beim nächsten Prompt nach so vielen Minuten wird neu gefetcht (0 = nur beim Sessionstart)",
+      "default": 15
+    },
+    "ignore": {
+      "type": "string",
+      "title": "Ausgenommene Repos",
+      "description": "Komma-getrennte Repo-Ordnernamen oder Pfade, die der Mod in Ruhe lässt (z. B. dotfiles, ~/Projekte/alt)",
+      "default": ""
+    }
+  }
 }

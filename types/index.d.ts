@@ -13,8 +13,16 @@ export type Behind = {
   error: string | null
 }
 
+/** A branch up to date with its upstream but holding commits not pushed yet. */
+export type Unpushed = {
+  root: string
+  branch: string
+  upstream: string
+  ahead: number
+}
+
 declare module 'claude-code' {
   interface PluginState {
-    'git-pull-guard': { behind: Shaped<Behind | null> }
+    'git-pull-guard': { behind: Shaped<Behind | null>; unpushed: Shaped<Unpushed | null> }
   }
 }

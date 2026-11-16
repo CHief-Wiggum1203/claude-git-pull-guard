@@ -1,4 +1,4 @@
-import { expect, test } from 'claude-code/testing'
+import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 const BAND = {
@@ -22,6 +22,7 @@ function fakeGit(on: On, repo: Repo) {
   const ran: string[] = []
   const toasts: string[] = []
   const fills: string[] = []
+  const clock = mock.clock(on, { now: 0 })
   on('env.get', () => ({ value: '/Users/me' }))
   on('ui.toast', (_, e) => {
     toasts.push(e.text)
@@ -42,12 +43,13 @@ function fakeGit(on: On, repo: Repo) {
     if (cmd === 'rev-parse --abbrev-ref HEAD') return ok('main\n')
     if (cmd.startsWith('rev-parse --abbrev-ref --symbolic-full-name')) return ok('origin/main\n')
     if (cmd === 'fetch --quiet') return ok('')
+    if (cmd === 'rev-list --count @{u}..HEAD') return ok(`${repo.ahead}\n`)
     if (cmd.startsWith('rev-list')) return ok(`${repo.ahead}\t${repo.behind}\n`)
     if (cmd.startsWith('status')) return ok(repo.isDirty ? ' M src/app.ts\n' : '')
     if (cmd.startsWith('merge')) return repo.mergeFails ? fail('fatal: Not possible to fast-forward, aborting.') : ok('')
     return fail(`unexpected: ${cmd}`)
   })
-  return { ran, toasts, fills }
+  return { ran, toasts, fills, clock }
 }
 
 test('a clean branch behind its upstream is pulled by itself, with no band', async ($, on) => {
@@ -115,4 +117,83 @@ test('an up-to-date branch shows nothing', async ($, on) => {
   await $.session.start({ cwd: '/Users/me/Projekte/app', surface: 'desktop', isInteractive: true })
   expect((await $.prompt.context({ blocks: [] })).blocks).toEqual([])
   expect(git.toasts).toEqual([])
+})
+
+test('a push onto an upstream that moved on is held, other commands pass', async ($, on) => {
+  const repo: Repo = { ahead: 1, behind: 0, isDirty: false }
+  const git = fakeGit(on, repo)
+  on('tool.call', () => ({ result: {} }))
+  await $.session.start({ cwd: '/Users/me/Projekte/app', surface: 'desktop', isInteractive: true })
+
+  // Up to date: the push goes through.
+  expect((await $.tool.call({ tool: 'Bash', command: 'git push' })).deny).toBeUndefined()
+
+  repo.behind = 2
+  const held = await $.tool.call({ tool: 'Bash', command: 'git -C /Users/me/Projekte/app push origin main' })
+  expect(held.deny).toContain('Push angehalten: main ist 2 Commits hinter origin/main.')
+  expect((await $.tool.call({ tool: 'Bash', command: 'git status' })).deny).toBeUndefined()
+  expect(git.ran.filter(cmd => cmd === 'fetch --quiet')).toHaveLength(3)
+})
+
+test('commits not pushed yet show a band after the answer', async ($, on) => {
+  const repo: Repo = { ahead: 0, behind: 0, isDirty: false }
+  const git = fakeGit(on, repo)
+  on('turn.complete', (_, e) => ({ text: e.answer }))
+  await $.session.start({ cwd: '/Users/me/Projekte/app', surface: 'desktop', isInteractive: true })
+
+  repo.ahead = 2
+  await $.turn.complete({ answer: 'committed', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount({ ...BAND, surface })
+    expect((await ui.find({ type: 'Text', text: /gepusht/ }))?.text).toBe('↑ 2 Commits auf main noch nicht gepusht')
+    await ui.unmount()
+  }
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  await ui.press({ key: 'push' })
+  expect(git.fills[0]).toContain('Bitte push die 2 Commits auf main')
+  await ui.press({ key: 'hide-unpushed' })
+  expect(await ui.find({ type: 'Text', text: /gepusht/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('with auto-pull off, a clean branch is only warned about', { options: { autoPull: false } }, async ($, on) => {
+  const git = fakeGit(on, { ahead: 0, behind: 4, isDirty: false })
+  await $.session.start({ cwd: '/Users/me/Projekte/app', surface: 'desktop', isInteractive: true })
+  const context = await $.prompt.context({ blocks: [] })
+
+  expect(git.ran).not.toContain('merge --ff-only --quiet @{u}')
+  expect(context.blocks[0]?.text).toContain('automatisches Pullen ausgeschaltet')
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  await ui.press({ key: 'pull' })
+  expect(git.toasts).toEqual(['↓ 4 Commits auf main geholt'])
+  await ui.unmount()
+})
+
+test('a repository the person set aside is left alone', { options: { ignore: 'dotfiles, app' } }, async ($, on) => {
+  const git = fakeGit(on, { ahead: 0, behind: 4, isDirty: true })
+  await $.session.start({ cwd: '/Users/me/Projekte/app', surface: 'desktop', isInteractive: true })
+  expect((await $.prompt.context({ blocks: [] })).blocks).toEqual([])
+  expect(git.ran).toEqual(['rev-parse --show-toplevel'])
+})
+
+test('a prompt after the set time fetches again and finds the new commits', { options: { recheckMinutes: 15 } }, async ($, on) => {
+  const repo: Repo = { ahead: 0, behind: 0, isDirty: true }
+  const git = fakeGit(on, repo)
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  await $.session.start({ cwd: '/Users/me/Projekte/app', surface: 'desktop', isInteractive: true })
+  await $.prompt.context({ blocks: [] })
+
+  repo.behind = 3
+  await git.clock.advance(10 * 60_000)
+  await $.turn.start({ text: 'zu früh', turnId: 't1' })
+  expect(git.ran.filter(cmd => cmd === 'fetch --quiet')).toHaveLength(1)
+
+  await git.clock.advance(6 * 60_000)
+  await $.turn.start({ text: 'jetzt', turnId: 't2' })
+  await $.prompt.context({ blocks: [] })
+  expect(git.ran.filter(cmd => cmd === 'fetch --quiet')).toHaveLength(2)
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect((await ui.find({ type: 'Text', text: /hinter/ }))?.text).toBe('⚠ main ist 3 Commits hinter origin/main. Erst pullen!')
+  await ui.unmount()
 })
