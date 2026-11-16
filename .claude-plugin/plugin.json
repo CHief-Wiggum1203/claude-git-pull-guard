@@ -1,0 +1,7 @@
+{
+  "name": "git-pull-guard",
+  "version": "0.1.0",
+  "description": "Holt beim Sessionstart neue Commits, wenn es gefahrlos geht, und warnt sonst, erst zu pullen",
+  "license": "MIT",
+  "types": "./types/index.d.ts"
+}

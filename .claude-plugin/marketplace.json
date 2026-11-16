@@ -1,0 +1,5 @@
+{
+  "name": "claude-git-pull-guard",
+  "owner": { "name": "CHief-Wiggum1203" },
+  "plugins": [{ "name": "git-pull-guard", "source": "./" }]
+}
