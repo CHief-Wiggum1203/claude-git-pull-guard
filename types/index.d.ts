@@ -21,8 +21,14 @@ export type Unpushed = {
   ahead: number
 }
 
+/** A repository Claude began changing while on a protected branch such as main. */
+export type OnProtected = {
+  root: string
+  branch: string
+}
+
 declare module 'claude-code' {
   interface PluginState {
-    'git-pull-guard': { behind: Shaped<Behind | null>; unpushed: Shaped<Unpushed | null> }
+    'git-pull-guard': { behind: Shaped<Behind | null>; unpushed: Shaped<Unpushed | null>; onProtected: Shaped<OnProtected | null> }
   }
 }

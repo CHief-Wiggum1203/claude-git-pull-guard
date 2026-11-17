@@ -11,6 +11,17 @@ const behind = atom({ plugin: 'git-pull-guard', key: 'behind' } as const, null, 
 const unpushed = atom({ plugin: 'git-pull-guard', key: 'unpushed' } as const, null, {
   shape: 'unpushed-1',
 })
+const onProtected = atom({ plugin: 'git-pull-guard', key: 'onProtected' } as const, null, {
+  shape: 'on-protected-1',
+})
+
+// The tools that change a file, and the input field naming it.
+const FILE_TOOLS: Record<string, string> = {
+  Edit: 'file_path',
+  MultiEdit: 'file_path',
+  Write: 'file_path',
+  NotebookEdit: 'notebook_path',
+}
 
 // Git never stops to ask for a password: a fetch that needs one fails instead.
 const GIT_ENV = { GIT_TERMINAL_PROMPT: '0' }
@@ -19,7 +30,7 @@ const GIT_ENV = { GIT_TERMINAL_PROMPT: '0' }
 const PUSH = /\bgit\b(?:\s+-\S+(?:\s+\S+)?)*?\s+push\b/
 
 /** What the person set in the mod's options. */
-type Settings = { autoPull: boolean; ignore: string[] }
+type Settings = { autoPull: boolean; ignore: string[]; protectedBranches: string[] }
 
 type Git = (args: string[], timeoutMs?: number) => Promise<{ isOk: boolean; out: string }>
 
@@ -37,12 +48,22 @@ function gitIn($: EngineInterface, cwd: string): Git {
 
 const commits = (n: number) => (n === 1 ? '1 Commit' : `${n} Commits`)
 
-/**
- * The repository's root, branch and upstream, or undefined where there is
- * nothing to sync: no repository, the home folder's, one the person set
- * aside, a detached HEAD, or a branch with no upstream.
- */
+/** The repository's root, branch and upstream, or undefined where there is nothing to sync. */
 async function branchOf($: EngineInterface, git: Git, settings: Settings) {
+  const at = await repoOf($, git, settings)
+  if (at === undefined) return undefined
+  const upstream = await git(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}'])
+  if (!upstream.isOk) return undefined
+
+  return { ...at, upstream: upstream.out }
+}
+
+/**
+ * The repository's root and branch, or undefined where there is none to
+ * watch: no repository, the home folder's, one the person set aside, or a
+ * detached HEAD.
+ */
+async function repoOf($: EngineInterface, git: Git, settings: Settings) {
   const root = await git(['rev-parse', '--show-toplevel'])
   const home = await $.env.get('HOME')
   // The home folder can be a repository of its own: no project to sync.
@@ -54,10 +75,9 @@ async function branchOf($: EngineInterface, git: Git, settings: Settings) {
   if (isIgnored) return undefined
 
   const branch = await git(['rev-parse', '--abbrev-ref', 'HEAD'])
-  const upstream = await git(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}'])
-  if (!branch.isOk || branch.out === 'HEAD' || !upstream.isOk) return undefined
+  if (!branch.isOk || branch.out === 'HEAD') return undefined
 
-  return { root: root.out, branch: branch.out, upstream: upstream.out }
+  return { root: root.out, branch: branch.out }
 }
 
 /**
@@ -126,16 +146,24 @@ export const register: Register = (on, options) => {
       .split(',')
       .map(entry => entry.trim().replace(/\/+$/, ''))
       .filter(entry => entry !== ''),
+    protectedBranches: String(options.protectedBranches ?? '')
+      .split(',')
+      .map(entry => entry.trim())
+      .filter(entry => entry !== ''),
   }
   const recheckMs = Number(options.recheckMinutes) * 60_000
   // The session's folder, and the check started for it, which the first context waits for.
   let cwd = ''
   let pending: Promise<void> = Promise.resolve()
   let checkedAt = 0
+  // The repositories on a protected branch Claude was already warned about.
+  let warned = new Set<string>()
 
   on('session.start', async ($, e, next) => {
     await update($, behind, () => null)
     await update($, unpushed, () => null)
+    await update($, onProtected, () => null)
+    warned = new Set()
     cwd = e.cwd
     checkedAt = await $.clock.now()
     pending = check($, cwd, settings)
@@ -185,12 +213,45 @@ export const register: Register = (on, options) => {
     }
   }).catch(($, e, next) => next(e))
 
+  // The first change Claude makes in a repository on main (or another
+  // protected branch) is held once, so it asks about a branch of its own first.
+  on('tool.call', async ($, e, next) => {
+    const field = FILE_TOOLS[e.tool]
+    const path = field === undefined ? undefined : (e as unknown as Record<string, unknown>)[field]
+    if (settings.protectedBranches.length === 0 || typeof path !== 'string' || !path.startsWith('/')) return next(e)
+    const at = await repoOf($, gitIn($, path.split('/').slice(0, -1).join('/') || '/'), settings)
+    if (at === undefined || !settings.protectedBranches.includes(at.branch) || warned.has(at.root)) return next(e)
+
+    warned.add(at.root)
+    await update($, onProtected, () => at)
+    return {
+      deny:
+        `Angehalten von git-pull-guard: ${at.root} ist auf dem Branch ${at.branch}. ` +
+        'Frag den Nutzer, bevor du hier etwas änderst, ob du erst einen eigenen Branch anlegen sollst ' +
+        '(git switch -c <name>). Will er auf ' + at.branch + ' weiterarbeiten, wiederhole die Änderung einfach: ' +
+        'dieser Hinweis kommt pro Repository nur einmal pro Session.',
+    }
+  }).catch(($, e, next) => next(e))
+
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const b = await read($, behind)
     const u = await read($, unpushed)
-    if (e.props.hasSurvey || (b === null && u === null)) return next(e)
+    const p = await read($, onProtected)
+    if (e.props.hasSurvey || (b === null && u === null && p === null)) return next(e)
 
     const { Box, Button, Text } = $.ui.resolve(e)
+
+    if (b === null && p !== null) {
+      return (
+        <Box flexDirection="row" alignItems="center" gap={1}>
+          <Text color="warning" wrap="truncate-end">
+            ✎ Claude will direkt auf {p.branch} ändern
+          </Text>
+          <Button key="branch" label="Erst Branch anlegen" variant="primary" onPress={() => askBranch($, p.branch)} />
+          <Button key="stay" label={`Auf ${p.branch} weiter`} onPress={() => stayOn($, p.branch)} />
+        </Box>
+      )
+    }
 
     if (b === null && u !== null) {
       return (
@@ -253,4 +314,17 @@ async function askPush($: EngineInterface, ahead: number, branch: string) {
     text: `Bitte push die ${commits(ahead)} auf ${branch}. Prüf vorher kurz, ob origin inzwischen neuer ist.`,
     mode: 'replace',
   })
+}
+
+async function askBranch($: EngineInterface, branch: string) {
+  await update($, onProtected, () => null)
+  await $.prompt.fill({
+    text: `Leg bitte zuerst einen neuen Branch von ${branch} für diese Arbeit an (git switch -c <passender-name>) und mach dort weiter.`,
+    mode: 'replace',
+  })
+}
+
+async function stayOn($: EngineInterface, branch: string) {
+  await update($, onProtected, () => null)
+  await $.prompt.fill({ text: `Passt so, arbeite direkt auf ${branch} weiter.`, mode: 'replace' })
 }

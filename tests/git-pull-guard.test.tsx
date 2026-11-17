@@ -15,7 +15,7 @@ const BAND = {
   },
 } as const
 
-type Repo = { ahead: number; behind: number; isDirty: boolean; root?: string; mergeFails?: boolean }
+type Repo = { ahead: number; behind: number; isDirty: boolean; root?: string; mergeFails?: boolean; branch?: string }
 
 /** A git that answers as a repository in the given state would; returns the commands it ran. */
 function fakeGit(on: On, repo: Repo) {
@@ -40,7 +40,7 @@ function fakeGit(on: On, repo: Repo) {
     const ok = (stdout: string) => ({ value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
     const fail = (stderr: string) => ({ value: { exitCode: 1, stdout: '', stderr, isStdoutTruncated: false, isStderrTruncated: false } })
     if (cmd === 'rev-parse --show-toplevel') return ok(`${repo.root ?? '/Users/me/Projekte/app'}\n`)
-    if (cmd === 'rev-parse --abbrev-ref HEAD') return ok('main\n')
+    if (cmd === 'rev-parse --abbrev-ref HEAD') return ok(`${repo.branch ?? 'main'}\n`)
     if (cmd.startsWith('rev-parse --abbrev-ref --symbolic-full-name')) return ok('origin/main\n')
     if (cmd === 'fetch --quiet') return ok('')
     if (cmd === 'rev-list --count @{u}..HEAD') return ok(`${repo.ahead}\n`)
@@ -196,4 +196,48 @@ test('a prompt after the set time fetches again and finds the new commits', { op
   const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
   expect((await ui.find({ type: 'Text', text: /hinter/ }))?.text).toBe('⚠ main ist 3 Commits hinter origin/main. Erst pullen!')
   await ui.unmount()
+})
+
+test('the first change on main is held once and asks about a branch of its own', async ($, on) => {
+  const git = fakeGit(on, { ahead: 0, behind: 0, isDirty: false })
+  on('tool.call', () => ({ result: {} }))
+  await $.session.start({ cwd: '/Users/me/Projekte/app', surface: 'desktop', isInteractive: true })
+  // The check started with the session ends before the first prompt is sent.
+  await $.prompt.context({ blocks: [] })
+
+  const held = await $.tool.call({ tool: 'Edit', file_path: '/Users/me/Projekte/app/src/a.ts', old_string: 'a', new_string: 'b' })
+  expect(held.deny).toContain('Angehalten von git-pull-guard: /Users/me/Projekte/app ist auf dem Branch main.')
+  // Reading is never held, and the warning comes once per repository.
+  expect((await $.tool.call({ tool: 'Read', file_path: '/Users/me/Projekte/app/src/a.ts' })).deny).toBeUndefined()
+  const again = await $.tool.call({ tool: 'Write', file_path: '/Users/me/Projekte/app/src/b.ts', content: 'x' })
+  expect(again.deny).toBeUndefined()
+
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount({ ...BAND, surface })
+    expect((await ui.find({ type: 'Text', text: /direkt auf/ }))?.text).toBe('✎ Claude will direkt auf main ändern')
+    await ui.unmount()
+  }
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  await ui.press({ key: 'branch' })
+  expect(git.fills[0]).toContain('neuen Branch von main')
+  expect(await ui.find({ type: 'Text', text: /direkt auf/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a feature branch, or the warning switched off, lets changes pass', { options: { protectedBranches: '' } }, async ($, on) => {
+  fakeGit(on, { ahead: 0, behind: 0, isDirty: false })
+  on('tool.call', () => ({ result: {} }))
+  await $.session.start({ cwd: '/Users/me/Projekte/app', surface: 'desktop', isInteractive: true })
+  // The check started with the session ends before the first prompt is sent.
+  await $.prompt.context({ blocks: [] })
+  expect((await $.tool.call({ tool: 'Write', file_path: '/Users/me/Projekte/app/a.ts', content: 'x' })).deny).toBeUndefined()
+})
+
+test('on a feature branch nothing is held', async ($, on) => {
+  fakeGit(on, { ahead: 0, behind: 0, isDirty: false, branch: 'feature/login' })
+  on('tool.call', () => ({ result: {} }))
+  await $.session.start({ cwd: '/Users/me/Projekte/app', surface: 'desktop', isInteractive: true })
+  // The check started with the session ends before the first prompt is sent.
+  await $.prompt.context({ blocks: [] })
+  expect((await $.tool.call({ tool: 'Write', file_path: '/Users/me/Projekte/app/a.ts', content: 'x' })).deny).toBeUndefined()
 })

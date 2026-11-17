@@ -1,7 +1,7 @@
 {
   "name": "git-pull-guard",
-  "version": "0.2.0",
-  "description": "Holt beim Sessionstart neue Commits, wenn es gefahrlos geht, warnt sonst, erst zu pullen, und hält Pushes auf einen veralteten Branch an",
+  "version": "0.3.0",
+  "description": "Holt beim Sessionstart neue Commits, wenn es gefahrlos geht, warnt sonst, erst zu pullen, hält Pushes auf einen veralteten Branch an und warnt vor Änderungen direkt auf main",
   "license": "MIT",
   "types": "./types/index.d.ts",
   "userConfig": {
@@ -22,6 +22,12 @@
       "title": "Ausgenommene Repos",
       "description": "Komma-getrennte Repo-Ordnernamen oder Pfade, die der Mod in Ruhe lässt (z. B. dotfiles, ~/Projekte/alt)",
       "default": ""
+    },
+    "protectedBranches": {
+      "type": "string",
+      "title": "Geschützte Branches",
+      "description": "Komma-getrennte Branches, auf denen Claude vor der ersten Änderung nachfragen soll (leer = aus)",
+      "default": "main, master"
     }
   }
 }
